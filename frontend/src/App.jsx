@@ -372,14 +372,31 @@ function VideoPanel() {
               <h3 className="text-lg font-semibold text-emerald-400 mb-4 flex items-center gap-2">
                 <CheckCircle2 size={20} /> Analysis Complete
               </h3>
-              {result.found_names && result.found_names.length > 0 ? (
+              {result.found_people && result.found_people.length > 0 ? (
                 <div>
-                  <p className="text-slate-400 text-sm mb-3">Identified Persons:</p>
-                  <div className="flex flex-wrap gap-2">
-                    {result.found_names.map(name => (
-                      <span key={name} className="bg-slate-800 text-slate-200 px-3 py-1.5 rounded-lg text-sm border border-slate-700">
-                        {name}
-                      </span>
+                  <p className="text-slate-400 text-sm mb-4">Identified Persons (Best Detection Frame):</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {result.found_people.map((person, idx) => (
+                      <div key={idx} className="relative group rounded-xl overflow-hidden border border-slate-700 hover:border-indigo-500 transition-all bg-slate-800/50">
+                        <div className="aspect-video overflow-hidden bg-black">
+                          <img
+                            src={person.frame_url}
+                            alt={person.name}
+                            className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
+                          />
+                        </div>
+                        <div className="p-3 space-y-1">
+                          <p className="font-semibold text-slate-200">{person.name}</p>
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-emerald-400 font-mono bg-emerald-500/10 px-2 py-1 rounded">
+                              {(person.confidence * 100).toFixed(1)}% match
+                            </span>
+                            <span className="text-slate-500">
+                              Frame #{person.frame_number}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -446,7 +463,7 @@ function RegisterPanel() {
       } else {
         setMessage({ type: 'error', text: data.message });
       }
-    } catch (e) {
+    } catch {
       setMessage({ type: 'error', text: 'Network error occurred' });
     } finally {
       setLoading(false);

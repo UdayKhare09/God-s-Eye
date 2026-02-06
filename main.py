@@ -16,6 +16,8 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 import threading
 import logging
+import time
+import re
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -308,7 +310,7 @@ async def recognize(file: UploadFile = File(...)):
 
 @app.post("/recognize_video")
 async def recognize_video(file: UploadFile = File(...)):
-    """Analyze a video file and identify all recognized faces."""
+    """Analyze a video file and identify all recognized faces, saving the frame with highest confidence."""
     temp_path = None
     try:
         if not known_embeddings:
@@ -316,6 +318,10 @@ async def recognize_video(file: UploadFile = File(...)):
                 status_code=400,
                 content={"message": "No registered faces in database"}
             )
+
+        # Ensure detections directory exists
+        detections_dir = "static/detections"
+        os.makedirs(detections_dir, exist_ok=True)
 
         # Save to temp file (cv2.VideoCapture needs a file path)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
@@ -327,8 +333,11 @@ async def recognize_video(file: UploadFile = File(...)):
         if not video_capture.isOpened():
             raise HTTPException(status_code=400, detail="Failed to open video file")
         
-        found_people = set()
+        # Dictionary to track best detection of each person
+        # name -> {"frame": ndarray, "confidence": float, "frame_number": int, "box": tuple}
+        found_people = {}
         frame_count = 0
+        scale_inverse = int(1 / FRAME_SCALE_FACTOR)
         
         # Get cached recognition data
         known_uuids, known_encs, known_names = get_db_lists()
@@ -337,7 +346,7 @@ async def recognize_video(file: UploadFile = File(...)):
             video_capture.release()
             return {
                 "message": "Video analysis complete",
-                "found_names": []
+                "found_people": []
             }
 
         while True:
@@ -356,18 +365,61 @@ async def recognize_video(file: UploadFile = File(...)):
                 
             face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
 
-            for face_encoding in face_encodings:
-                is_match, _, name, _ = find_best_match(
+            for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+                is_match, _, name, confidence = find_best_match(
                     face_encoding, known_encs, known_uuids, known_names
                 )
+                
+                # Track the frame with highest confidence for each person
                 if is_match:
-                    found_people.add(name)
+                    if name not in found_people or confidence > found_people[name]["confidence"]:
+                        # Scale coordinates back to original frame size
+                        scaled_top = top * scale_inverse
+                        scaled_right = right * scale_inverse
+                        scaled_bottom = bottom * scale_inverse
+                        scaled_left = left * scale_inverse
+                        
+                        # Store frame and metadata (will save the best one later)
+                        found_people[name] = {
+                            "frame": frame.copy(),
+                            "confidence": confidence,
+                            "frame_number": frame_count,
+                            "box": (scaled_left, scaled_top, scaled_right, scaled_bottom)
+                        }
 
         video_capture.release()
 
+        # Now save the best frame for each person
+        result_people = []
+        for name, data in found_people.items():
+            frame = data["frame"]
+            left, top, right, bottom = data["box"]
+            confidence = data["confidence"]
+            
+            # Draw bounding box and label on the frame
+            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 3)
+            cv2.rectangle(frame, (left, bottom - 40), (right, bottom), (0, 255, 0), cv2.FILLED)
+            cv2.putText(frame, f"{name} ({confidence:.1%})", 
+                      (left + 6, bottom - 10), 
+                      cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 2)
+            
+            # Save frame with unique filename
+            timestamp = int(time.time() * 1000)
+            safe_name = re.sub(r'[^a-z0-9]+', '_', name.lower())
+            filename = f"{timestamp}_{safe_name}.jpg"
+            filepath = os.path.join(detections_dir, filename)
+            cv2.imwrite(filepath, frame)
+            
+            result_people.append({
+                "name": name,
+                "frame_url": f"/detections/{filename}",
+                "confidence": confidence,
+                "frame_number": data["frame_number"]
+            })
+
         return {
             "message": "Video analysis complete",
-            "found_names": list(found_people)
+            "found_people": result_people
         }
 
     except Exception as e:
