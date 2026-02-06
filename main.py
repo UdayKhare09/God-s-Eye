@@ -63,6 +63,17 @@ def save_db():
     with open(DB_FILE, "wb") as f:
         pickle.dump(known_embeddings, f)
 
+@app.get("/users")
+async def get_users():
+    users = []
+    for uid, data in known_embeddings.items():
+        users.append({
+            "uuid": uid,
+            "name": data["name"],
+            "count": len(data["embeddings"])
+        })
+    return users
+
 # Load DB on startup
 load_db()
 
