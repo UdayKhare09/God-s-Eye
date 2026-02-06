@@ -5,8 +5,8 @@ function App() {
   const [activeTab, setActiveTab] = useState('surveillance');
 
   return (
-    <div className="min-h-screen w-full bg-slate-950 text-slate-100 font-sans selection:bg-indigo-500/30">
-      <div className="container mx-auto px-4 py-8 max-w-5xl">
+    <div className="min-h-screen w-full bg-slate-950 text-slate-100 font-sans">
+      <div className="px-4 py-8">
         <header className="mb-12 text-center">
           <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent mb-4">
             God's Eye
@@ -101,7 +101,7 @@ function SurveillancePanel() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="space-y-6">
       <Card>
         <div className="flex flex-col gap-6">
           <div className="space-y-4">
@@ -250,7 +250,7 @@ function ScanPanel() {
   }, [result]);
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <div className="max-w-4xl mx-auto">
       <Card>
         <div className="space-y-6">
           <div className="grid place-items-center border-2 border-dashed border-slate-800 rounded-2xl p-8 hover:border-slate-700 transition-colors bg-slate-950/30">
@@ -337,7 +337,7 @@ function VideoPanel() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
+    <div className="max-w-4xl mx-auto">
       <Card>
         <h2 className="text-2xl font-bold mb-6">Video Forensics</h2>
 
@@ -395,20 +395,41 @@ function VideoPanel() {
 }
 
 function RegisterPanel() {
+  const [mode, setMode] = useState('new'); // 'new' or 'existing'
   const [name, setName] = useState('');
+  const [selectedUser, setSelectedUser] = useState('');
+  const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
   const fileInputRef = useRef(null);
 
+  useEffect(() => {
+    fetchUsers();
+  }, []);
+
+  const fetchUsers = async () => {
+    try {
+      const res = await fetch('/users');
+      if (res.ok) {
+        const data = await res.json();
+        setUsers(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch users", e);
+    }
+  };
+
   const register = async () => {
     const files = fileInputRef.current.files;
-    if (!name || files.length === 0) return;
+    const targetName = mode === 'new' ? name : selectedUser;
+
+    if (!targetName || files.length === 0) return;
 
     setLoading(true);
     setMessage(null);
 
     const formData = new FormData();
-    formData.append('name', name);
+    formData.append('name', targetName);
     for (let i = 0; i < files.length; i++) {
       formData.append('files', files[i]);
     }
@@ -419,7 +440,9 @@ function RegisterPanel() {
       if (res.ok) {
         setMessage({ type: 'success', text: data.message });
         setName('');
+        setSelectedUser('');
         fileInputRef.current.value = '';
+        fetchUsers(); // Refresh list to update counts
       } else {
         setMessage({ type: 'error', text: data.message });
       }
@@ -431,28 +454,67 @@ function RegisterPanel() {
   };
 
   return (
-    <div className="max-w-xl mx-auto">
+    <div className="max-w-2xl mx-auto w-full">
       <Card>
-        <div className="flex items-center gap-4 mb-6">
-          <div className="w-12 h-12 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center">
+        <div className="flex flex-col md:flex-row items-center gap-4 mb-6 text-center md:text-left">
+          <div className="w-12 h-12 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0">
             <UserPlus size={24} />
           </div>
           <div>
-            <h2 className="text-2xl font-bold">New Subject</h2>
-            <p className="text-slate-500 text-sm">Register a new person to the database</p>
+            <h2 className="text-2xl font-bold">Manage Subjects</h2>
+            <p className="text-slate-500 text-sm">Register new people or add photos to existing ones</p>
           </div>
         </div>
 
-        <div className="space-y-5">
+        <div className="space-y-6">
+          {/* Toggle */}
+          <div className="flex bg-slate-950/50 p-1 rounded-xl border border-slate-800/50">
+            <button
+              onClick={() => setMode('new')}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${mode === 'new' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              New Subject
+            </button>
+            <button
+              onClick={() => setMode('existing')}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${mode === 'existing' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Existing Subject
+            </button>
+          </div>
+
           <div>
-            <label className="block text-sm font-medium text-slate-300 mb-1.5">Full Name</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-3 text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all placeholder:text-slate-600"
-              placeholder="e.g. John Doe"
-            />
+            <label className="block text-sm font-medium text-slate-300 mb-1.5">
+              {mode === 'new' ? 'Full Name' : 'Select Subject'}
+            </label>
+
+            {mode === 'new' ? (
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-3 text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all placeholder:text-slate-600"
+                placeholder="e.g. John Doe"
+              />
+            ) : (
+              <div className="relative">
+                <select
+                  value={selectedUser}
+                  onChange={(e) => setSelectedUser(e.target.value)}
+                  className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-3 text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all appearance-none cursor-pointer"
+                >
+                  <option value="">-- Choose a subject --</option>
+                  {users.map(u => (
+                    <option key={u.uuid} value={u.name}>
+                      {u.name} ({u.count} photos)
+                    </option>
+                  ))}
+                </select>
+                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.5 4.5L6 8L9.5 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                </div>
+              </div>
+            )}
           </div>
 
           <div>
@@ -469,16 +531,16 @@ function RegisterPanel() {
 
           <button
             onClick={register}
-            disabled={loading || !name}
+            disabled={loading || (mode === 'new' ? !name : !selectedUser)}
             className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white py-3.5 rounded-xl font-bold transition-all shadow-[0_4px_20px_-4px_rgba(79,70,229,0.3)] mt-2"
           >
-            {loading ? <Loader2 className="animate-spin mx-auto" /> : 'Register Subject'}
+            {loading ? <Loader2 className="animate-spin mx-auto" /> : (mode === 'new' ? 'Register Subject' : 'Update Subject')}
           </button>
 
           {message && (
-            <div className={`p-4 rounded-xl text-sm font-medium flex items-center gap-3 ${message.type === 'success'
-                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+            <div className={`p-4 rounded-xl text-sm font-medium flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 ${message.type === 'success'
+              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+              : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
               }`}>
               {message.type === 'success' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
               {message.text}
