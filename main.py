@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import face_recognition
 import numpy as np
@@ -243,6 +243,112 @@ async def recognize_video(file: UploadFile = File(...)):
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.remove(temp_path)
         return JSONResponse(status_code=500, content={"message": str(e)})
+
+
+# Global state for RTSP
+camera_config = {
+    "url": None
+}
+
+def get_db_lists():
+    """Helper to get flattened lists from known_embeddings for recognition"""
+    k_uuids = [] 
+    k_encs = []
+    k_names = {}
+    for uid, data in known_embeddings.items():
+        k_names[uid] = data["name"]
+        for emb in data["embeddings"]:
+            k_uuids.append(uid)
+            k_encs.append(emb)
+    return k_uuids, k_encs, k_names
+
+def generate_frames(rtsp_url):
+    camera = cv2.VideoCapture(rtsp_url)
+    if not camera.isOpened():
+        print(f"Cannot open camera: {rtsp_url}")
+        return
+
+    # Cache execution data
+    k_uuids, k_encs, k_names = get_db_lists()
+    
+    frame_count = 0
+    # Store detected faces: [(top, right, bottom, left, name, color)]
+    detected_faces = []
+    
+    while True:
+        success, frame = camera.read()
+        if not success:
+            break
+        
+        frame_count += 1
+
+        # Process every 30 frames (approx 1 second at 30fps) to prevent lag
+        if frame_count % 30 == 0 and len(k_encs) > 0:
+            # Resize for faster processing
+            small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+            # Convert BGR to RGB
+            rgb_small_frame = np.ascontiguousarray(small_frame[:, :, ::-1])
+            
+            face_locations = face_recognition.face_locations(rgb_small_frame)
+            face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+            
+            new_faces = []
+            for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+                # Scale back up
+                top *= 2
+                right *= 2
+                bottom *= 2
+                left *= 2
+
+                matches = face_recognition.compare_faces(k_encs, face_encoding, tolerance=0.5)
+                name = "Unknown"
+                color = (0, 0, 255) # Red for unknown
+
+                face_distances = face_recognition.face_distance(k_encs, face_encoding)
+                if len(face_distances) > 0:
+                    best_match_index = np.argmin(face_distances)
+                    if matches[best_match_index]:
+                        uuid = k_uuids[best_match_index]
+                        name = k_names[uuid]
+                        color = (0, 255, 0) # Green for known
+                
+                new_faces.append((top, right, bottom, left, name, color))
+            
+            detected_faces = new_faces
+
+        # Draw detected faces on every frame
+        for (top, right, bottom, left, name, color) in detected_faces:
+            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+            cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+            cv2.putText(frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
+        
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+    camera.release()
+
+@app.post("/set_camera_url")
+async def set_camera_url(url: str = Form(...)):
+    camera_config["url"] = url
+    return {"message": "Camera URL updated successfully"}
+
+@app.get("/video_feed")
+async def video_feed():
+    url = camera_config.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="No camera URL set. Please configure it first.")
+    
+    # Check if we can actually connect (quick check)
+    cap = cv2.VideoCapture(url)
+    if not cap.isOpened():
+         raise HTTPException(status_code=400, detail="Failed to connect to RTSP stream")
+    cap.release()
+    
+    return StreamingResponse(generate_frames(url), media_type="multipart/x-mixed-replace; boundary=frame")
+
 
 
 # Mount static files at the end to avoid conflicts with API routes

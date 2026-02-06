@@ -270,6 +270,23 @@
             <div id="vid-content" class="result-content"></div>
         </div>
     </div>
+    <!-- Real-time Surveillance Card -->
+    <div class="card">
+        <h2>Real-time Surveillance</h2>
+        <div class="form-group">
+            <label for="rtsp-url">RTSP Stream URL</label>
+            <input type="text" id="rtsp-url" placeholder="rtsp://username:password@ip:port/stream" value="">
+        </div>
+        <div class="form-group" id="stream-container" style="display: none;">
+            <img id="live-stream" style="width: 100%; border-radius: 0.5rem; background: #000;" />
+        </div>
+        <div style="display: flex; gap: 1rem;">
+            <button id="start-stream-btn" onclick="startSurveillance()">Start Stream</button>
+            <button id="stop-stream-btn" onclick="stopSurveillance()"
+                style="background-color: #ef4444; display: none;">Stop Stream</button>
+        </div>
+        <div id="stream-result" class="result"></div>
+    </div>
     </div>
 
     <script>
@@ -528,6 +545,68 @@
                 btn.disabled = false;
                 btn.innerText = btn.dataset.text || 'Submit';
             }
+        }
+
+        async function startSurveillance() {
+            const urlInput = document.getElementById('rtsp-url');
+            const url = urlInput.value;
+            const resultDiv = document.getElementById('stream-result');
+            const startBtn = document.getElementById('start-stream-btn');
+            const stopBtn = document.getElementById('stop-stream-btn');
+            const streamContainer = document.getElementById('stream-container');
+            const liveStream = document.getElementById('live-stream');
+
+            if (!url) {
+                showResult(resultDiv, 'Please enter an RTSP URL', 'error');
+                return;
+            }
+
+            setLoading(startBtn, true);
+            resultDiv.style.display = 'none';
+
+            const formData = new FormData();
+            formData.append('url', url);
+
+            try {
+                // Set the URL on the server
+                const response = await fetch('/set_camera_url', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    // Start the stream
+                    liveStream.src = `/video_feed?t=${new Date().getTime()}`; // Add timestamp to prevent caching
+                    streamContainer.style.display = 'block';
+                    startBtn.style.display = 'none';
+                    stopBtn.style.display = 'block';
+                    urlInput.disabled = true;
+                    showResult(resultDiv, 'Stream started', 'success');
+                } else {
+                    const data = await response.json();
+                    showResult(resultDiv, data.detail || 'Failed to connect to camera', 'error');
+                }
+            } catch (error) {
+                showResult(resultDiv, 'Network error occurred', 'error');
+            } finally {
+                setLoading(startBtn, false);
+            }
+        }
+
+        function stopSurveillance() {
+            const startBtn = document.getElementById('start-stream-btn');
+            const stopBtn = document.getElementById('stop-stream-btn');
+            const streamContainer = document.getElementById('stream-container');
+            const liveStream = document.getElementById('live-stream');
+            const urlInput = document.getElementById('rtsp-url');
+            const resultDiv = document.getElementById('stream-result');
+
+            liveStream.src = "";
+            streamContainer.style.display = 'none';
+            startBtn.style.display = 'block';
+            stopBtn.style.display = 'none';
+            urlInput.disabled = false;
+            resultDiv.style.display = 'none';
         }
     </script>
 </body>
