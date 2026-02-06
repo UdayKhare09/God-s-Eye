@@ -49,7 +49,7 @@
 
         @media (min-width: 768px) {
             .container {
-                grid-template-columns: 1fr 1fr;
+                grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
             }
         }
 
@@ -238,228 +238,298 @@
         </div>
 
         <!-- Recognition Card -->
-        <div class="card">
-            <h2>Identify Subject</h2>
-            <div class="form-group">
-                <div class="form-group">
-                    <label for="rec-file">Upload Photo to Scan</label>
-                    <input type="file" id="rec-file" accept="image/*">
-                    <div style="position: relative; margin-top: 1rem;">
-                        <img id="rec-preview" class="preview-img" style="margin-top: 0; width: 100%; height: auto;">
-                        <canvas id="rec-canvas"
-                            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></canvas>
-                    </div>
-                </div>
-                <button id="rec-btn" onclick="recognize()">Scan & Identify</button>
-                <div id="rec-result" class="result">
-                    <h3 style="margin: 0; font-size: 1.1rem;">Match Found!</h3>
-                    <div id="rec-content" class="result-content"></div>
-                </div>
+        <div class="form-group">
+            <label for="rec-file">Upload Photo to Scan</label>
+            <input type="file" id="rec-file" accept="image/*">
+            <div style="position: relative; margin-top: 1rem;">
+                <img id="rec-preview" class="preview-img" style="margin-top: 0; width: 100%; height: auto;">
+                <canvas id="rec-canvas"
+                    style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></canvas>
             </div>
         </div>
+        <button id="rec-btn" onclick="recognize()">Scan & Identify</button>
+        <div id="rec-result" class="result">
+            <h3 style="margin: 0; font-size: 1.1rem;">Match Found!</h3>
+            <div id="rec-content" class="result-content"></div>
+        </div>
+    </div>
 
-        <script>
-            // Image Previews
-            document.getElementById('reg-file').onchange = evt => {
-                const files = document.getElementById('reg-file').files;
-                const container = document.getElementById('preview-container');
-                container.innerHTML = '';
+    <!-- Video Analysis Card -->
+    <div class="card">
+        <h2>Video Analysis</h2>
+        <div class="form-group">
+            <label for="vid-file">Upload Video to Scan</label>
+            <input type="file" id="vid-file" accept="video/*">
+            <div id="vid-preview-container" style="display:none; margin-top:1rem;">
+                <span class="loader"></span> Processing video... this may take a while.
+            </div>
+        </div>
+        <button id="vid-btn" onclick="analyzeVideo()">Analyze Video</button>
+        <div id="vid-result" class="result">
+            <h3 style="margin: 0; font-size: 1.1rem;">Analysis Complete</h3>
+            <div id="vid-content" class="result-content"></div>
+        </div>
+    </div>
+    </div>
 
-                if (files.length > 0) {
-                    Array.from(files).forEach(file => {
-                        const img = document.createElement('img');
-                        img.src = URL.createObjectURL(file);
-                        img.style.cssText = 'width: 100%; height: 100px; object-fit: cover; border-radius: 0.25rem;';
-                        container.appendChild(img);
-                    });
-                }
-            };
+    <script>
+        // Image Previews
+        document.getElementById('reg-file').onchange = evt => {
+            const files = document.getElementById('reg-file').files;
+            const container = document.getElementById('preview-container');
+            container.innerHTML = '';
 
-            document.getElementById('rec-file').onchange = evt => {
-                const [file] = document.getElementById('rec-file').files;
-                if (file) {
-                    const preview = document.getElementById('rec-preview');
-                    const canvas = document.getElementById('rec-canvas');
+            if (files.length > 0) {
+                Array.from(files).forEach(file => {
+                    const img = document.createElement('img');
+                    img.src = URL.createObjectURL(file);
+                    img.style.cssText = 'width: 100%; height: 100px; object-fit: cover; border-radius: 0.25rem;';
+                    container.appendChild(img);
+                });
+            }
+        };
 
-                    // Reset canvas
-                    const ctx = canvas.getContext('2d');
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+        document.getElementById('rec-file').onchange = evt => {
+            const [file] = document.getElementById('rec-file').files;
+            if (file) {
+                const preview = document.getElementById('rec-preview');
+                const canvas = document.getElementById('rec-canvas');
 
-                    preview.src = URL.createObjectURL(file);
-                    preview.style.display = 'block';
+                // Reset canvas
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-                    // Wait for image load to set canvas dimensions
-                    preview.onload = () => {
-                        canvas.width = preview.clientWidth;
-                        canvas.height = preview.clientHeight;
-                    };
-                }
-            };
+                preview.src = URL.createObjectURL(file);
+                preview.style.display = 'block';
 
-            async function register() {
-                const name = document.getElementById('reg-name').value;
-                const fileInput = document.getElementById('reg-file');
-                const files = fileInput.files;
-                const resultDiv = document.getElementById('reg-result');
-                const btn = document.getElementById('reg-btn');
+                // Wait for image load to set canvas dimensions
+                preview.onload = () => {
+                    canvas.width = preview.clientWidth;
+                    canvas.height = preview.clientHeight;
+                };
+            }
+        };
 
-                if (!name || files.length === 0) {
-                    showResult(resultDiv, 'Please provide name and at least one image', 'error');
-                    return;
-                }
+        async function register() {
+            const name = document.getElementById('reg-name').value;
+            const fileInput = document.getElementById('reg-file');
+            const files = fileInput.files;
+            const resultDiv = document.getElementById('reg-result');
+            const btn = document.getElementById('reg-btn');
 
-                setLoading(btn, true);
-                resultDiv.style.display = 'none';
-
-                const formData = new FormData();
-                formData.append('name', name);
-                for (let i = 0; i < files.length; i++) {
-                    formData.append('files', files[i]);
-                }
-
-                try {
-                    const response = await fetch('/register', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    const data = await response.json();
-
-                    if (response.ok) {
-                        showResult(resultDiv, `Success! ${data.message}`, 'success');
-                        // Clear inputs
-                        document.getElementById('reg-name').value = '';
-                        fileInput.value = '';
-                        document.getElementById('preview-container').innerHTML = '';
-                    } else {
-                        showResult(resultDiv, data.message || 'Registration failed', 'error');
-                    }
-                } catch (error) {
-                    showResult(resultDiv, 'Network error occurred', 'error');
-                } finally {
-                    setLoading(btn, false);
-                }
+            if (!name || files.length === 0) {
+                showResult(resultDiv, 'Please provide name and at least one image', 'error');
+                return;
             }
 
-            async function recognize() {
-                const fileInput = document.getElementById('rec-file');
-                const file = fileInput.files[0];
-                const resultDiv = document.getElementById('rec-result');
-                const contentDiv = document.getElementById('rec-content');
-                const btn = document.getElementById('rec-btn');
+            setLoading(btn, true);
+            resultDiv.style.display = 'none';
 
-                if (!file) {
-                    showResult(resultDiv, 'Please upload an image to scan', 'error');
-                    return;
+            const formData = new FormData();
+            formData.append('name', name);
+            for (let i = 0; i < files.length; i++) {
+                formData.append('files', files[i]);
+            }
+
+            try {
+                const response = await fetch('/register', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showResult(resultDiv, `Success! ${data.message}`, 'success');
+                    // Clear inputs
+                    document.getElementById('reg-name').value = '';
+                    fileInput.value = '';
+                    document.getElementById('preview-container').innerHTML = '';
+                } else {
+                    showResult(resultDiv, data.message || 'Registration failed', 'error');
                 }
+            } catch (error) {
+                showResult(resultDiv, 'Network error occurred', 'error');
+            } finally {
+                setLoading(btn, false);
+            }
+        }
 
-                setLoading(btn, true);
-                resultDiv.style.display = 'none';
+        async function recognize() {
+            const fileInput = document.getElementById('rec-file');
+            const file = fileInput.files[0];
+            const resultDiv = document.getElementById('rec-result');
+            const contentDiv = document.getElementById('rec-content');
+            const btn = document.getElementById('rec-btn');
 
-                const formData = new FormData();
-                formData.append('file', file);
+            if (!file) {
+                showResult(resultDiv, 'Please upload an image to scan', 'error');
+                return;
+            }
 
-                try {
-                    const response = await fetch('/recognize', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    const data = await response.json();
+            setLoading(btn, true);
+            resultDiv.style.display = 'none';
 
-                    if (response.ok) {
-                        const canvas = document.getElementById('rec-canvas');
-                        const img = document.getElementById('rec-preview');
-                        const ctx = canvas.getContext('2d');
+            const formData = new FormData();
+            formData.append('file', file);
 
-                        // Match canvas size to displayed image size
-                        canvas.width = img.clientWidth;
-                        canvas.height = img.clientHeight;
+            try {
+                const response = await fetch('/recognize', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
 
-                        // Scale factors (natural size vs displayed size)
-                        const scaleX = img.clientWidth / img.naturalWidth;
-                        const scaleY = img.clientHeight / img.naturalHeight;
+                if (response.ok) {
+                    const canvas = document.getElementById('rec-canvas');
+                    const img = document.getElementById('rec-preview');
+                    const ctx = canvas.getContext('2d');
 
-                        // Clear previous drawings
-                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    // Match canvas size to displayed image size
+                    canvas.width = img.clientWidth;
+                    canvas.height = img.clientHeight;
 
-                        if (data.faces && data.faces.length > 0) {
-                            resultDiv.className = 'result success';
-                            let html = `<p>Found ${data.faces.length} face(s):</p><ul style="list-style: none; padding: 0;">`;
+                    // Scale factors (natural size vs displayed size)
+                    const scaleX = img.clientWidth / img.naturalWidth;
+                    const scaleY = img.clientHeight / img.naturalHeight;
 
-                            data.faces.forEach(face => {
-                                // Draw Box
-                                const box = face.box;
-                                const x = box.left * scaleX;
-                                const y = box.top * scaleY;
-                                const w = (box.right - box.left) * scaleX;
-                                const h = (box.bottom - box.top) * scaleY;
+                    // Clear previous drawings
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-                                const color = face.match ? '#22c55e' : '#ef4444';
+                    if (data.faces && data.faces.length > 0) {
+                        resultDiv.className = 'result success';
+                        let html = `<p>Found ${data.faces.length} face(s):</p><ul style="list-style: none; padding: 0;">`;
 
-                                ctx.strokeStyle = color;
-                                ctx.lineWidth = 3;
-                                ctx.strokeRect(x, y, w, h);
+                        data.faces.forEach(face => {
+                            // Draw Box
+                            const box = face.box;
+                            const x = box.left * scaleX;
+                            const y = box.top * scaleY;
+                            const w = (box.right - box.left) * scaleX;
+                            const h = (box.bottom - box.top) * scaleY;
 
-                                // Draw Label Background
-                                ctx.fillStyle = color;
-                                const text = face.match ? `${face.name} (${(face.confidence * 100).toFixed(0)}%)` : face.name;
-                                ctx.font = 'bold 14px Inter, sans-serif';
-                                const textWidth = ctx.measureText(text).width;
-                                ctx.fillRect(x, y - 24, textWidth + 10, 24);
+                            const color = face.match ? '#22c55e' : '#ef4444';
 
-                                // Draw Label Text
-                                ctx.fillStyle = '#ffffff';
-                                ctx.fillText(text, x + 5, y - 7);
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = 3;
+                            ctx.strokeRect(x, y, w, h);
 
-                                // List item
-                                const matchColor = face.match ? 'var(--text)' : '#ef4444';
-                                html += `
+                            // Draw Label Background
+                            ctx.fillStyle = color;
+                            const text = face.match ? `${face.name} (${(face.confidence * 100).toFixed(0)}%)` : face.name;
+                            ctx.font = 'bold 14px Inter, sans-serif';
+                            const textWidth = ctx.measureText(text).width;
+                            ctx.fillRect(x, y - 24, textWidth + 10, 24);
+
+                            // Draw Label Text
+                            ctx.fillStyle = '#ffffff';
+                            ctx.fillText(text, x + 5, y - 7);
+
+                            // List item
+                            const matchColor = face.match ? 'var(--text)' : '#ef4444';
+                            html += `
                                     <li style="margin-bottom: 0.5rem; padding: 0.5rem; background: rgba(255,255,255,0.05); border-radius: 4px; display: flex; justify-content: space-between;">
                                         <span style="color: ${matchColor}; font-weight: 500;">${face.name}</span>
                                         ${face.match ? `<span style="opacity: 0.7; font-size: 0.9em;">${(face.confidence * 100).toFixed(1)}%</span>` : ''}
                                     </li>`;
-                            });
+                        });
 
-                            html += '</ul>';
-                            contentDiv.innerHTML = html;
-                            resultDiv.querySelector('h3').textContent = 'Scan Complete';
-                            resultDiv.querySelector('h3').style.color = '#fff';
-                            resultDiv.style.display = 'block';
-                        } else {
-                            resultDiv.className = 'result error';
-                            contentDiv.innerHTML = `<p>${data.message}</p>`;
-                            resultDiv.style.display = 'block';
-                            resultDiv.querySelector('h3').textContent = 'No Match';
-                            resultDiv.querySelector('h3').style.color = '#ef4444';
-                        }
+                        html += '</ul>';
+                        contentDiv.innerHTML = html;
+                        resultDiv.querySelector('h3').textContent = 'Scan Complete';
+                        resultDiv.querySelector('h3').style.color = '#fff';
+                        resultDiv.style.display = 'block';
                     } else {
-                        showResult(resultDiv, data.message || 'Recognition failed', 'error');
+                        resultDiv.className = 'result error';
+                        contentDiv.innerHTML = `<p>${data.message}</p>`;
+                        resultDiv.style.display = 'block';
+                        resultDiv.querySelector('h3').textContent = 'No Match';
+                        resultDiv.querySelector('h3').style.color = '#ef4444';
                     }
-                } catch (error) {
-                    console.error(error);
-                    showResult(resultDiv, 'Network error occurred', 'error');
-                } finally {
-                    setLoading(btn, false);
-                }
-            }
-
-            function showResult(element, message, type) {
-                element.className = `result ${type}`;
-                element.innerHTML = message;
-                element.style.display = 'block';
-            }
-
-            function setLoading(btn, isLoading) {
-                if (isLoading) {
-                    btn.disabled = true;
-                    const originalText = btn.innerText;
-                    btn.dataset.text = originalText;
-                    btn.innerHTML = '<span class="loader"></span> Processing...';
                 } else {
-                    btn.disabled = false;
-                    btn.innerText = btn.dataset.text || 'Submit';
+                    showResult(resultDiv, data.message || 'Recognition failed', 'error');
                 }
+            } catch (error) {
+                console.error(error);
+                showResult(resultDiv, 'Network error occurred', 'error');
+            } finally {
+                setLoading(btn, false);
             }
-        </script>
+        }
+
+        async function analyzeVideo() {
+            const fileInput = document.getElementById('vid-file');
+            const file = fileInput.files[0];
+            const resultDiv = document.getElementById('vid-result');
+            const contentDiv = document.getElementById('vid-content');
+            const btn = document.getElementById('vid-btn');
+            const loader = document.getElementById('vid-preview-container');
+
+            if (!file) {
+                showResult(resultDiv, 'Please upload a video to analyze', 'error');
+                return;
+            }
+
+            setLoading(btn, true);
+            resultDiv.style.display = 'none';
+            loader.style.display = 'block';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/recognize_video', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                loader.style.display = 'none';
+
+                if (response.ok) {
+                    resultDiv.className = 'result success';
+                    if (data.found_names && data.found_names.length > 0) {
+                        let html = `<p>Found ${data.found_names.length} unique person(s):</p><ul style="list-style: none; padding: 0;">`;
+                        data.found_names.forEach(name => {
+                            html += `<li style="margin-bottom: 0.5rem; padding: 0.5rem; background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.2); border-radius: 4px; color: #22c55e; font-weight: 600;">${name}</li>`;
+                        });
+                        html += '</ul>';
+                        contentDiv.innerHTML = html;
+                    } else {
+                        contentDiv.innerHTML = '<p>Video analyzed, but no registered faces were found.</p>';
+                    }
+                    resultDiv.style.display = 'block';
+                    resultDiv.querySelector('h3').textContent = 'Analysis Complete';
+                    resultDiv.querySelector('h3').style.color = '#fff';
+                } else {
+                    showResult(resultDiv, data.message || 'Analysis failed', 'error');
+                }
+            } catch (error) {
+                console.error(error);
+                showResult(resultDiv, 'Network error occurred', 'error');
+            } finally {
+                setLoading(btn, false);
+                loader.style.display = 'none';
+            }
+        }
+
+        function showResult(element, message, type) {
+            element.className = `result ${type}`;
+            element.innerHTML = message;
+            element.style.display = 'block';
+        }
+
+        function setLoading(btn, isLoading) {
+            if (isLoading) {
+                btn.disabled = true;
+                const originalText = btn.innerText;
+                btn.dataset.text = originalText;
+                btn.innerHTML = '<span class="loader"></span> Processing...';
+            } else {
+                btn.disabled = false;
+                btn.innerText = btn.dataset.text || 'Submit';
+            }
+        }
+    </script>
 </body>
 
 </html>
