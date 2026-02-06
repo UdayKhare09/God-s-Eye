@@ -13,7 +13,17 @@ import cv2
 import tempfile
 import shutil
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For development; strict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Create static directory if it doesn't exist (just in case)
 os.makedirs("static", exist_ok=True)
