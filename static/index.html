@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>God's Eye - Face Recognition</title>
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-dark: #4f46e5;
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 800;
+            background: linear-gradient(to right, #6366f1, #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin: 2rem 0;
+            letter-spacing: -0.025em;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            padding: 1rem;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 2rem;
+        }
+
+        @media (min-width: 768px) {
+            .container {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        .card {
+            background-color: var(--surface);
+            border-radius: 1rem;
+            border: 1px solid var(--border);
+            padding: 2rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            transition: transform 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+        }
+
+        h2 {
+            margin-top: 0;
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            background-color: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 0.75rem;
+            color: var(--text);
+            font-size: 1rem;
+            transition: border-color 0.2s;
+            box-sizing: border-box;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+        }
+
+        input[type="file"] {
+            width: 100%;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+
+            file-selector-button {
+                margin-right: 1rem;
+                padding: 0.5rem 1rem;
+                border: none;
+                border-radius: 0.5rem;
+                background-color: var(--border);
+                color: var(--text);
+                cursor: pointer;
+                transition: background-color 0.2s;
+            }
+
+            file-selector-button:hover {
+                background-color: #475569;
+            }
+        }
+
+        button {
+            width: 100%;
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            padding: 0.75rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: var(--primary-dark);
+        }
+
+        button:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        .result {
+            margin-top: 1.5rem;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            background-color: var(--bg);
+            border: 1px solid var(--border);
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .result.success {
+            border-color: #22c55e;
+            color: #22c55e;
+        }
+
+        .result.error {
+            border-color: #ef4444;
+            color: #ef4444;
+        }
+
+        .result-content {
+            color: var(--text);
+            margin-top: 0.5rem;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .preview-img {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+            background-color: var(--bg);
+            display: none;
+        }
+
+        .loader {
+            display: inline-block;
+            width: 1rem;
+            height: 1rem;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 0.5rem;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <h1>God's Eye</h1>
+
+    <div class="container">
+        <!-- Registration Card -->
+        <div class="card">
+            <h2>Add Subject</h2>
+            <div class="form-group">
+                <label for="reg-name">Name</label>
+                <input type="text" id="reg-name" placeholder="Enter person's name">
+            </div>
+            <div class="form-group">
+                <label for="reg-file">Photos (Select multiple to improve accuracy)</label>
+                <input type="file" id="reg-file" accept="image/*" multiple>
+                <div id="preview-container"
+                    style="display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 0.5rem; margin-top: 1rem;">
+                </div>
+            </div>
+            <button id="reg-btn" onclick="register()">Register Face</button>
+            <div id="reg-result" class="result"></div>
+        </div>
+
+        <!-- Recognition Card -->
+        <div class="card">
+            <h2>Identify Subject</h2>
+            <div class="form-group">
+                <div class="form-group">
+                    <label for="rec-file">Upload Photo to Scan</label>
+                    <input type="file" id="rec-file" accept="image/*">
+                    <div style="position: relative; margin-top: 1rem;">
+                        <img id="rec-preview" class="preview-img" style="margin-top: 0; width: 100%; height: auto;">
+                        <canvas id="rec-canvas"
+                            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></canvas>
+                    </div>
+                </div>
+                <button id="rec-btn" onclick="recognize()">Scan & Identify</button>
+                <div id="rec-result" class="result">
+                    <h3 style="margin: 0; font-size: 1.1rem;">Match Found!</h3>
+                    <div id="rec-content" class="result-content"></div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            // Image Previews
+            document.getElementById('reg-file').onchange = evt => {
+                const files = document.getElementById('reg-file').files;
+                const container = document.getElementById('preview-container');
+                container.innerHTML = '';
+
+                if (files.length > 0) {
+                    Array.from(files).forEach(file => {
+                        const img = document.createElement('img');
+                        img.src = URL.createObjectURL(file);
+                        img.style.cssText = 'width: 100%; height: 100px; object-fit: cover; border-radius: 0.25rem;';
+                        container.appendChild(img);
+                    });
+                }
+            };
+
+            document.getElementById('rec-file').onchange = evt => {
+                const [file] = document.getElementById('rec-file').files;
+                if (file) {
+                    const preview = document.getElementById('rec-preview');
+                    const canvas = document.getElementById('rec-canvas');
+
+                    // Reset canvas
+                    const ctx = canvas.getContext('2d');
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                    preview.src = URL.createObjectURL(file);
+                    preview.style.display = 'block';
+
+                    // Wait for image load to set canvas dimensions
+                    preview.onload = () => {
+                        canvas.width = preview.clientWidth;
+                        canvas.height = preview.clientHeight;
+                    };
+                }
+            };
+
+            async function register() {
+                const name = document.getElementById('reg-name').value;
+                const fileInput = document.getElementById('reg-file');
+                const files = fileInput.files;
+                const resultDiv = document.getElementById('reg-result');
+                const btn = document.getElementById('reg-btn');
+
+                if (!name || files.length === 0) {
+                    showResult(resultDiv, 'Please provide name and at least one image', 'error');
+                    return;
+                }
+
+                setLoading(btn, true);
+                resultDiv.style.display = 'none';
+
+                const formData = new FormData();
+                formData.append('name', name);
+                for (let i = 0; i < files.length; i++) {
+                    formData.append('files', files[i]);
+                }
+
+                try {
+                    const response = await fetch('/register', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        showResult(resultDiv, `Success! ${data.message}`, 'success');
+                        // Clear inputs
+                        document.getElementById('reg-name').value = '';
+                        fileInput.value = '';
+                        document.getElementById('preview-container').innerHTML = '';
+                    } else {
+                        showResult(resultDiv, data.message || 'Registration failed', 'error');
+                    }
+                } catch (error) {
+                    showResult(resultDiv, 'Network error occurred', 'error');
+                } finally {
+                    setLoading(btn, false);
+                }
+            }
+
+            async function recognize() {
+                const fileInput = document.getElementById('rec-file');
+                const file = fileInput.files[0];
+                const resultDiv = document.getElementById('rec-result');
+                const contentDiv = document.getElementById('rec-content');
+                const btn = document.getElementById('rec-btn');
+
+                if (!file) {
+                    showResult(resultDiv, 'Please upload an image to scan', 'error');
+                    return;
+                }
+
+                setLoading(btn, true);
+                resultDiv.style.display = 'none';
+
+                const formData = new FormData();
+                formData.append('file', file);
+
+                try {
+                    const response = await fetch('/recognize', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        const canvas = document.getElementById('rec-canvas');
+                        const img = document.getElementById('rec-preview');
+                        const ctx = canvas.getContext('2d');
+
+                        // Match canvas size to displayed image size
+                        canvas.width = img.clientWidth;
+                        canvas.height = img.clientHeight;
+
+                        // Scale factors (natural size vs displayed size)
+                        const scaleX = img.clientWidth / img.naturalWidth;
+                        const scaleY = img.clientHeight / img.naturalHeight;
+
+                        // Clear previous drawings
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                        if (data.faces && data.faces.length > 0) {
+                            resultDiv.className = 'result success';
+                            let html = `<p>Found ${data.faces.length} face(s):</p><ul style="list-style: none; padding: 0;">`;
+
+                            data.faces.forEach(face => {
+                                // Draw Box
+                                const box = face.box;
+                                const x = box.left * scaleX;
+                                const y = box.top * scaleY;
+                                const w = (box.right - box.left) * scaleX;
+                                const h = (box.bottom - box.top) * scaleY;
+
+                                const color = face.match ? '#22c55e' : '#ef4444';
+
+                                ctx.strokeStyle = color;
+                                ctx.lineWidth = 3;
+                                ctx.strokeRect(x, y, w, h);
+
+                                // Draw Label Background
+                                ctx.fillStyle = color;
+                                const text = face.match ? `${face.name} (${(face.confidence * 100).toFixed(0)}%)` : face.name;
+                                ctx.font = 'bold 14px Inter, sans-serif';
+                                const textWidth = ctx.measureText(text).width;
+                                ctx.fillRect(x, y - 24, textWidth + 10, 24);
+
+                                // Draw Label Text
+                                ctx.fillStyle = '#ffffff';
+                                ctx.fillText(text, x + 5, y - 7);
+
+                                // List item
+                                const matchColor = face.match ? 'var(--text)' : '#ef4444';
+                                html += `
+                                    <li style="margin-bottom: 0.5rem; padding: 0.5rem; background: rgba(255,255,255,0.05); border-radius: 4px; display: flex; justify-content: space-between;">
+                                        <span style="color: ${matchColor}; font-weight: 500;">${face.name}</span>
+                                        ${face.match ? `<span style="opacity: 0.7; font-size: 0.9em;">${(face.confidence * 100).toFixed(1)}%</span>` : ''}
+                                    </li>`;
+                            });
+
+                            html += '</ul>';
+                            contentDiv.innerHTML = html;
+                            resultDiv.querySelector('h3').textContent = 'Scan Complete';
+                            resultDiv.querySelector('h3').style.color = '#fff';
+                            resultDiv.style.display = 'block';
+                        } else {
+                            resultDiv.className = 'result error';
+                            contentDiv.innerHTML = `<p>${data.message}</p>`;
+                            resultDiv.style.display = 'block';
+                            resultDiv.querySelector('h3').textContent = 'No Match';
+                            resultDiv.querySelector('h3').style.color = '#ef4444';
+                        }
+                    } else {
+                        showResult(resultDiv, data.message || 'Recognition failed', 'error');
+                    }
+                } catch (error) {
+                    console.error(error);
+                    showResult(resultDiv, 'Network error occurred', 'error');
+                } finally {
+                    setLoading(btn, false);
+                }
+            }
+
+            function showResult(element, message, type) {
+                element.className = `result ${type}`;
+                element.innerHTML = message;
+                element.style.display = 'block';
+            }
+
+            function setLoading(btn, isLoading) {
+                if (isLoading) {
+                    btn.disabled = true;
+                    const originalText = btn.innerText;
+                    btn.dataset.text = originalText;
+                    btn.innerHTML = '<span class="loader"></span> Processing...';
+                } else {
+                    btn.disabled = false;
+                    btn.innerText = btn.dataset.text || 'Submit';
+                }
+            }
+        </script>
+</body>
+
+</html>
