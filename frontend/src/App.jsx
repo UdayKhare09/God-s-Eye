@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Upload, Camera, Video, UserPlus, Scan, Eye, Play, Square, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Upload, Camera, Video, UserPlus, Scan, Eye, Play, Square, Loader2, AlertCircle, CheckCircle2, Users, Clock, Zap } from 'lucide-react';
 
 function App() {
   const [activeTab, setActiveTab] = useState('surveillance');
@@ -318,23 +318,123 @@ function VideoPanel() {
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  // Progress tracking state
+  const [progress, setProgress] = useState(0);
+  const [currentFrame, setCurrentFrame] = useState(0);
+  const [totalFrames, setTotalFrames] = useState(0);
+  const [processingFps, setProcessingFps] = useState(0);
+  const [etaSeconds, setEtaSeconds] = useState(0);
+  const [liveDetections, setLiveDetections] = useState([]);
+  const [status, setStatus] = useState('idle');
+
+  const eventSourceRef = useRef(null);
+
+  const formatEta = (seconds) => {
+    if (seconds <= 0) return '--:--';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const analyze = async () => {
     if (!file) return;
+
+    // Reset state
     setLoading(true);
     setResult(null);
+    setError(null);
+    setProgress(0);
+    setCurrentFrame(0);
+    setTotalFrames(0);
+    setProcessingFps(0);
+    setEtaSeconds(0);
+    setLiveDetections([]);
+    setStatus('uploading');
+
     const formData = new FormData();
     formData.append('file', file);
+
     try {
+      // Start the video analysis job
       const res = await fetch('/recognize_video', { method: 'POST', body: formData });
       const data = await res.json();
-      setResult(data);
+
+      if (!res.ok) {
+        throw new Error(data.message || 'Failed to start video analysis');
+      }
+
+      const jobId = data.job_id;
+      setStatus('processing');
+
+      // Connect to SSE for progress updates
+      const eventSource = new EventSource(`/video_progress/${jobId}`);
+      eventSourceRef.current = eventSource;
+
+      eventSource.onmessage = (event) => {
+        const eventData = JSON.parse(event.data);
+
+        if (eventData.error) {
+          setError(eventData.error);
+          setLoading(false);
+          setStatus('error');
+          eventSource.close();
+          return;
+        }
+
+        if (eventData.type === 'progress') {
+          setProgress(eventData.progress);
+          setCurrentFrame(eventData.current_frame);
+          setTotalFrames(eventData.total_frames);
+          setProcessingFps(eventData.processing_fps);
+          setEtaSeconds(eventData.eta_seconds);
+
+          // Handle new detections
+          if (eventData.new_detections && eventData.new_detections.length > 0) {
+            setLiveDetections(prev => [...prev, ...eventData.new_detections]);
+          }
+        }
+
+        if (eventData.type === 'complete') {
+          setResult(eventData.result);
+          setLoading(false);
+          setStatus('complete');
+          setProgress(100);
+          eventSource.close();
+        }
+
+        if (eventData.type === 'error') {
+          setError(eventData.error);
+          setLoading(false);
+          setStatus('error');
+          eventSource.close();
+        }
+      };
+
+      eventSource.onerror = () => {
+        setError('Lost connection to server');
+        setLoading(false);
+        setStatus('error');
+        eventSource.close();
+      };
+
     } catch (e) {
       console.error(e);
-    } finally {
+      setError(e.message);
       setLoading(false);
+      setStatus('error');
     }
   };
+
+  // Cleanup EventSource on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -347,8 +447,15 @@ function VideoPanel() {
             <input
               type="file"
               accept="video/*"
-              onChange={e => setFile(e.target.files[0])}
-              className="w-full text-slate-400 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-500/10 file:text-indigo-400 hover:file:bg-indigo-500/20 transition-all cursor-pointer bg-slate-900/50 rounded-xl p-1"
+              onChange={e => {
+                setFile(e.target.files[0]);
+                setResult(null);
+                setLiveDetections([]);
+                setProgress(0);
+                setStatus('idle');
+              }}
+              disabled={loading}
+              className="w-full text-slate-400 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-500/10 file:text-indigo-400 hover:file:bg-indigo-500/20 transition-all cursor-pointer bg-slate-900/50 rounded-xl p-1 disabled:opacity-50"
             />
           </div>
 
@@ -361,17 +468,123 @@ function VideoPanel() {
             {loading ? 'Processing Video...' : 'Start Analysis'}
           </button>
 
+          {/* Progress Section */}
           {loading && (
-            <div className="text-center p-8 text-slate-500 text-sm animate-pulse">
-              This might take some time depending on video length...
+            <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2">
+              {/* Progress Bar */}
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-slate-400">
+                    {status === 'uploading' ? 'Uploading...' : 'Analyzing frames...'}
+                  </span>
+                  <span className="text-indigo-400 font-mono">{progress.toFixed(1)}%</span>
+                </div>
+                <div className="h-3 bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-indigo-600 to-purple-500 rounded-full transition-all duration-300 ease-out"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Stats Row */}
+              {status === 'processing' && totalFrames > 0 && (
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-slate-900/50 rounded-xl p-3 border border-slate-800/50">
+                    <div className="flex items-center gap-2 text-slate-500 text-xs mb-1">
+                      <Video size={14} />
+                      Frames
+                    </div>
+                    <div className="text-lg font-semibold text-slate-200">
+                      {currentFrame.toLocaleString()} <span className="text-slate-500 text-sm">/ {totalFrames.toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <div className="bg-slate-900/50 rounded-xl p-3 border border-slate-800/50">
+                    <div className="flex items-center gap-2 text-slate-500 text-xs mb-1">
+                      <Zap size={14} />
+                      Speed
+                    </div>
+                    <div className="text-lg font-semibold text-slate-200">
+                      {processingFps} <span className="text-slate-500 text-sm">fps</span>
+                    </div>
+                  </div>
+                  <div className="bg-slate-900/50 rounded-xl p-3 border border-slate-800/50">
+                    <div className="flex items-center gap-2 text-slate-500 text-xs mb-1">
+                      <Clock size={14} />
+                      ETA
+                    </div>
+                    <div className="text-lg font-semibold text-slate-200 font-mono">
+                      {formatEta(etaSeconds)}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Live Detections */}
+              {liveDetections.length > 0 && (
+                <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-800/50">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Users size={16} className="text-emerald-400" />
+                    <span className="text-sm font-medium text-slate-300">Live Detections</span>
+                    <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full">
+                      {liveDetections.filter(d => d.is_new).length} found
+                    </span>
+                  </div>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {liveDetections.map((detection, idx) => (
+                      <div
+                        key={idx}
+                        className={`flex items-center justify-between p-2 rounded-lg border transition-all ${detection.is_new
+                            ? 'bg-emerald-500/10 border-emerald-500/30 animate-in fade-in slide-in-from-left-2'
+                            : 'bg-slate-800/30 border-slate-700/30'
+                          }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          {detection.is_new && (
+                            <span className="text-xs bg-emerald-500 text-white px-1.5 py-0.5 rounded font-medium">NEW</span>
+                          )}
+                          <span className="text-slate-200 font-medium">{detection.name}</span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs">
+                          <span className="text-emerald-400 font-mono">
+                            {(detection.confidence * 100).toFixed(1)}%
+                          </span>
+                          <span className="text-slate-500">
+                            Frame #{detection.frame_number}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
+          {/* Error Display */}
+          {error && (
+            <div className="bg-rose-950/30 border border-rose-900/50 text-rose-300 p-4 rounded-xl flex items-center gap-3">
+              <AlertCircle size={20} />
+              {error}
+            </div>
+          )}
+
+          {/* Final Results */}
           {result && (
             <div className="bg-slate-900/50 p-6 rounded-xl border border-slate-800 animate-in fade-in slide-in-from-bottom-4">
               <h3 className="text-lg font-semibold text-emerald-400 mb-4 flex items-center gap-2">
                 <CheckCircle2 size={20} /> Analysis Complete
               </h3>
+
+              {/* Summary Stats */}
+              {result.processing_time && (
+                <div className="flex gap-4 mb-4 text-sm text-slate-400">
+                  <span>Processed in <strong className="text-slate-200">{result.processing_time}s</strong></span>
+                  <span>•</span>
+                  <span><strong className="text-slate-200">{result.total_frames_analyzed}</strong> frames analyzed</span>
+                </div>
+              )}
+
               {result.found_people && result.found_people.length > 0 ? (
                 <div>
                   <p className="text-slate-400 text-sm mb-4">Identified Persons (Best Detection Frame):</p>

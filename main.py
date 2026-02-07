@@ -17,6 +17,8 @@ import threading
 import logging
 import time
 import re
+import json
+import asyncio
 import insightface
 from insightface.app import FaceAnalysis
 import onnxruntime as ort
@@ -85,6 +87,11 @@ _cache_valid = False
 
 # InsightFace model (lazy loaded)
 _face_analyzer: Optional[FaceAnalysis] = None
+
+# Video analysis jobs - for SSE progress tracking
+# job_id -> {"status": str, "progress": float, "detections": list, "result": dict}
+video_jobs: Dict[str, dict] = {}
+jobs_lock = threading.Lock()
 
 
 # ============================================================================
@@ -254,6 +261,163 @@ def process_image_bytes(contents: bytes) -> np.ndarray:
     if img is None:
         raise ValueError("Failed to decode image")
     return img
+
+
+# ============================================================================
+# VIDEO ANALYSIS WITH PROGRESS TRACKING
+# ============================================================================
+def process_video_with_progress(job_id: str, temp_path: str):
+    """
+    Process video in background thread with progress updates.
+    Updates video_jobs[job_id] with progress, detections, and final result.
+    """
+    try:
+        detections_dir = "static/detections"
+        os.makedirs(detections_dir, exist_ok=True)
+        
+        video_capture = cv2.VideoCapture(temp_path)
+        
+        if not video_capture.isOpened():
+            with jobs_lock:
+                video_jobs[job_id]["status"] = "error"
+                video_jobs[job_id]["error"] = "Failed to open video file"
+            return
+        
+        # Get video properties
+        total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = video_capture.get(cv2.CAP_PROP_FPS) or 30
+        
+        with jobs_lock:
+            video_jobs[job_id]["total_frames"] = total_frames
+            video_jobs[job_id]["fps"] = fps
+            video_jobs[job_id]["status"] = "processing"
+        
+        analyzer = get_face_analyzer()
+        known_uuids, known_matrix, known_names = get_cached_embeddings()
+        
+        if len(known_matrix) == 0:
+            video_capture.release()
+            with jobs_lock:
+                video_jobs[job_id]["status"] = "complete"
+                video_jobs[job_id]["progress"] = 100
+                video_jobs[job_id]["result"] = {"message": "Video analysis complete", "found_people": []}
+            return
+        
+        # Track best detection of each person
+        found_people = {}
+        frame_count = 0
+        frames_processed = 0
+        start_time = time.time()
+        
+        while True:
+            ret, frame = video_capture.read()
+            if not ret:
+                break
+            
+            frame_count += 1
+            
+            # Update progress
+            progress = (frame_count / total_frames) * 100 if total_frames > 0 else 0
+            elapsed = time.time() - start_time
+            frames_per_sec = frames_processed / elapsed if elapsed > 0 else 0
+            remaining_frames = total_frames - frame_count
+            eta_seconds = remaining_frames / (fps * (frames_processed / frame_count)) if frames_processed > 0 and frame_count > 0 else 0
+            
+            with jobs_lock:
+                video_jobs[job_id]["progress"] = progress
+                video_jobs[job_id]["current_frame"] = frame_count
+                video_jobs[job_id]["processing_fps"] = round(frames_per_sec, 1)
+                video_jobs[job_id]["eta_seconds"] = round(eta_seconds, 1)
+            
+            if frame_count % VIDEO_PROCESS_EVERY_N_FRAMES != 0:
+                continue
+            
+            frames_processed += 1
+            faces = analyzer.get(frame)
+            
+            for face in faces:
+                embedding = face.embedding / np.linalg.norm(face.embedding)
+                bbox = face.bbox.astype(int)
+                
+                is_match, _, name, confidence = find_best_match(
+                    embedding, known_uuids, known_matrix, known_names
+                )
+                
+                if is_match:
+                    # Check if this is a new detection or better confidence
+                    is_new = name not in found_people
+                    is_better = not is_new and confidence > found_people[name]["confidence"]
+                    
+                    if is_new or is_better:
+                        found_people[name] = {
+                            "frame": frame.copy(),
+                            "confidence": confidence,
+                            "frame_number": frame_count,
+                            "box": (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                        }
+                        
+                        # Send detection event
+                        with jobs_lock:
+                            detection_event = {
+                                "name": name,
+                                "confidence": confidence,
+                                "frame_number": frame_count,
+                                "is_new": is_new
+                            }
+                            video_jobs[job_id]["detections"].append(detection_event)
+                            video_jobs[job_id]["latest_detection"] = detection_event
+        
+        video_capture.release()
+        
+        # Save best frame for each person
+        result_people = []
+        for name, data in found_people.items():
+            frame = data["frame"]
+            left, top, right, bottom = data["box"]
+            confidence = data["confidence"]
+            
+            # Draw bounding box and label
+            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 3)
+            cv2.rectangle(frame, (left, bottom - 40), (right, bottom), (0, 255, 0), cv2.FILLED)
+            cv2.putText(
+                frame, f"{name} ({confidence:.1%})",
+                (left + 6, bottom - 10),
+                cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 2
+            )
+            
+            # Save frame
+            timestamp = int(time.time() * 1000)
+            safe_name = re.sub(r'[^a-z0-9]+', '_', name.lower())
+            filename = f"{timestamp}_{safe_name}.jpg"
+            filepath = os.path.join(detections_dir, filename)
+            cv2.imwrite(filepath, frame)
+            
+            result_people.append({
+                "name": name,
+                "frame_url": f"/detections/{filename}",
+                "confidence": confidence,
+                "frame_number": data["frame_number"]
+            })
+        
+        with jobs_lock:
+            video_jobs[job_id]["status"] = "complete"
+            video_jobs[job_id]["progress"] = 100
+            video_jobs[job_id]["result"] = {
+                "message": "Video analysis complete",
+                "found_people": result_people,
+                "total_frames_analyzed": frame_count,
+                "processing_time": round(time.time() - start_time, 2)
+            }
+            
+    except Exception as e:
+        logger.error(f"Video processing error: {e}")
+        with jobs_lock:
+            video_jobs[job_id]["status"] = "error"
+            video_jobs[job_id]["error"] = str(e)
+    finally:
+        # Cleanup temp file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 # ============================================================================
@@ -440,8 +604,10 @@ async def recognize(file: UploadFile = File(...)):
 
 @app.post("/recognize_video")
 async def recognize_video(file: UploadFile = File(...)):
-    """Analyze a video file and identify all recognized faces."""
-    temp_path = None
+    """
+    Start video analysis job and return job ID for progress tracking.
+    Use /video_progress/{job_id} SSE endpoint to track progress.
+    """
     try:
         if not known_embeddings:
             return JSONResponse(
@@ -449,103 +615,113 @@ async def recognize_video(file: UploadFile = File(...)):
                 content={"message": "No registered faces in database"}
             )
         
-        # Ensure detections directory exists
-        detections_dir = "static/detections"
-        os.makedirs(detections_dir, exist_ok=True)
+        # Create job ID
+        job_id = str(uuid.uuid4())
         
         # Save to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             shutil.copyfileobj(file.file, tmp)
             temp_path = tmp.name
         
-        video_capture = cv2.VideoCapture(temp_path)
+        # Initialize job state
+        with jobs_lock:
+            video_jobs[job_id] = {
+                "status": "starting",
+                "progress": 0,
+                "current_frame": 0,
+                "total_frames": 0,
+                "fps": 0,
+                "processing_fps": 0,
+                "eta_seconds": 0,
+                "detections": [],
+                "latest_detection": None,
+                "result": None,
+                "error": None
+            }
         
-        if not video_capture.isOpened():
-            raise HTTPException(status_code=400, detail="Failed to open video file")
+        # Start processing in background thread
+        thread = threading.Thread(
+            target=process_video_with_progress,
+            args=(job_id, temp_path),
+            daemon=True
+        )
+        thread.start()
         
-        analyzer = get_face_analyzer()
-        known_uuids, known_matrix, known_names = get_cached_embeddings()
-        
-        if len(known_matrix) == 0:
-            video_capture.release()
-            return {"message": "Video analysis complete", "found_people": []}
-        
-        # Track best detection of each person
-        # name -> {"frame": ndarray, "confidence": float, "frame_number": int, "box": tuple}
-        found_people = {}
-        frame_count = 0
-        
-        while True:
-            ret, frame = video_capture.read()
-            if not ret:
-                break
-            
-            frame_count += 1
-            if frame_count % VIDEO_PROCESS_EVERY_N_FRAMES != 0:
-                continue
-            
-            faces = analyzer.get(frame)
-            
-            for face in faces:
-                embedding = face.embedding / np.linalg.norm(face.embedding)
-                bbox = face.bbox.astype(int)
-                
-                is_match, _, name, confidence = find_best_match(
-                    embedding, known_uuids, known_matrix, known_names
-                )
-                
-                if is_match:
-                    if name not in found_people or confidence > found_people[name]["confidence"]:
-                        found_people[name] = {
-                            "frame": frame.copy(),
-                            "confidence": confidence,
-                            "frame_number": frame_count,
-                            "box": (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
-                        }
-        
-        video_capture.release()
-        
-        # Save best frame for each person
-        result_people = []
-        for name, data in found_people.items():
-            frame = data["frame"]
-            left, top, right, bottom = data["box"]
-            confidence = data["confidence"]
-            
-            # Draw bounding box and label
-            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 3)
-            cv2.rectangle(frame, (left, bottom - 40), (right, bottom), (0, 255, 0), cv2.FILLED)
-            cv2.putText(
-                frame, f"{name} ({confidence:.1%})",
-                (left + 6, bottom - 10),
-                cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 2
-            )
-            
-            # Save frame
-            timestamp = int(time.time() * 1000)
-            safe_name = re.sub(r'[^a-z0-9]+', '_', name.lower())
-            filename = f"{timestamp}_{safe_name}.jpg"
-            filepath = os.path.join(detections_dir, filename)
-            cv2.imwrite(filepath, frame)
-            
-            result_people.append({
-                "name": name,
-                "frame_url": f"/detections/{filename}",
-                "confidence": confidence,
-                "frame_number": data["frame_number"]
-            })
-        
-        return {
-            "message": "Video analysis complete",
-            "found_people": result_people
-        }
+        return {"job_id": job_id, "message": "Video analysis started"}
         
     except Exception as e:
         logger.error(f"Video recognition error: {e}")
         return JSONResponse(status_code=500, content={"message": str(e)})
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+
+
+@app.get("/video_progress/{job_id}")
+async def video_progress(job_id: str):
+    """
+    Server-Sent Events endpoint for real-time video analysis progress.
+    Streams progress updates, detection events, and final results.
+    """
+    async def event_generator():
+        last_detection_count = 0
+        
+        while True:
+            with jobs_lock:
+                job = video_jobs.get(job_id)
+            
+            if job is None:
+                yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
+                break
+            
+            # Send progress update
+            event_data = {
+                "type": "progress",
+                "status": job["status"],
+                "progress": round(job["progress"], 1),
+                "current_frame": job["current_frame"],
+                "total_frames": job["total_frames"],
+                "processing_fps": job["processing_fps"],
+                "eta_seconds": job["eta_seconds"],
+                "detections_count": len(job["detections"])
+            }
+            
+            # Include new detections
+            if len(job["detections"]) > last_detection_count:
+                new_detections = job["detections"][last_detection_count:]
+                event_data["new_detections"] = new_detections
+                last_detection_count = len(job["detections"])
+            
+            yield f"data: {json.dumps(event_data)}\n\n"
+            
+            # Check if complete or error
+            if job["status"] == "complete":
+                yield f"data: {json.dumps({'type': 'complete', 'result': job['result']})}\n\n"
+                break
+            elif job["status"] == "error":
+                yield f"data: {json.dumps({'type': 'error', 'error': job['error']})}\n\n"
+                break
+            
+            await asyncio.sleep(0.3)  # Update every 300ms
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@app.get("/video_job/{job_id}")
+async def get_video_job(job_id: str):
+    """Get the current state of a video analysis job."""
+    with jobs_lock:
+        job = video_jobs.get(job_id)
+    
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return job
 
 
 # ============================================================================
