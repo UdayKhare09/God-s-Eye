@@ -34,7 +34,12 @@ logger = logging.getLogger(__name__)
 def _detect_device() -> dict:
     """Detect whether a CUDA GPU is available via ONNX Runtime providers."""
     available = ort.get_available_providers()
-    use_gpu = "CUDAExecutionProvider" in available
+    
+    # Check if NVIDIA drivers are actually available (prevents loading CUDA libs on CPU-only)
+    has_nvidia_driver = shutil.which("nvidia-smi") is not None
+    
+    use_gpu = "CUDAExecutionProvider" in available and has_nvidia_driver
+    
     if use_gpu:
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
         ctx_id = 0  # GPU device id
