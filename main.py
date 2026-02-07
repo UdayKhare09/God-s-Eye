@@ -19,20 +19,55 @@ import time
 import re
 import insightface
 from insightface.app import FaceAnalysis
+import onnxruntime as ort
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 # ============================================================================
-# CONFIGURATION - Tune these for your CPU
+# GPU / CPU AUTO-DETECTION
 # ============================================================================
-DB_FILE = "data/embeddings_insightface.pkl"  # New DB file for InsightFace embeddings
+def _detect_device() -> dict:
+    """Detect whether a CUDA GPU is available via ONNX Runtime providers."""
+    available = ort.get_available_providers()
+    use_gpu = "CUDAExecutionProvider" in available
+    if use_gpu:
+        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        ctx_id = 0  # GPU device id
+    else:
+        providers = ['CPUExecutionProvider']
+        ctx_id = -1  # CPU
+    return {
+        "use_gpu": use_gpu,
+        "providers": providers,
+        "ctx_id": ctx_id,
+        "available_providers": available,
+    }
+
+
+DEVICE_INFO = _detect_device()
+logger.info(f"Device: {'GPU (CUDA)' if DEVICE_INFO['use_gpu'] else 'CPU'}")
+logger.info(f"Available ONNX Runtime providers: {DEVICE_INFO['available_providers']}")
+
+# ============================================================================
+# CONFIGURATION - Auto-tuned for GPU when available, CPU fallback
+# ============================================================================
+DB_FILE = "data/embeddings_insightface.pkl"  # DB file for InsightFace embeddings
 RECOGNITION_THRESHOLD = 0.5  # Cosine distance threshold (lower = stricter, higher = more lenient)
-VIDEO_PROCESS_EVERY_N_FRAMES = 5  # Process more frames since InsightFace is faster
-STREAM_PROCESS_EVERY_N_FRAMES = 5  # More frequent updates for streams
-DETECTION_SIZE = 640  # Detection input size (320/480/640 - lower = faster)
 MODEL_NAME = "buffalo_l"  # buffalo_sc (fast) | buffalo_s | buffalo_l (most accurate, best for angles)
+
+if DEVICE_INFO["use_gpu"]:
+    # GPU can handle heavier workloads
+    VIDEO_PROCESS_EVERY_N_FRAMES = 2   # Process nearly every frame on GPU
+    STREAM_PROCESS_EVERY_N_FRAMES = 2  # Near real-time stream processing
+    DETECTION_SIZE = 640               # Full resolution detection
+else:
+    # Conservative settings for CPU
+    VIDEO_PROCESS_EVERY_N_FRAMES = 5
+    STREAM_PROCESS_EVERY_N_FRAMES = 5
+    DETECTION_SIZE = 640               # Detection input size (320/480/640 - lower = faster)
 
 # Thread-safe locks
 db_lock = threading.Lock()
@@ -57,8 +92,8 @@ _face_analyzer: Optional[FaceAnalysis] = None
 # ============================================================================
 def get_face_analyzer() -> FaceAnalysis:
     """
-    Lazy load the InsightFace model with CPU optimizations.
-    Uses thread-safe singleton pattern.
+    Lazy load the InsightFace model with GPU acceleration when available.
+    Falls back to CPU automatically. Uses thread-safe singleton pattern.
     """
     global _face_analyzer
     
@@ -69,21 +104,25 @@ def get_face_analyzer() -> FaceAnalysis:
         if _face_analyzer is not None:
             return _face_analyzer
         
-        logger.info(f"Loading InsightFace model: {MODEL_NAME}")
+        device_label = "GPU (CUDA)" if DEVICE_INFO["use_gpu"] else "CPU"
+        logger.info(f"Loading InsightFace model: {MODEL_NAME} on {device_label}")
         start_time = time.time()
         
-        # Initialize with CPU provider
+        # Initialize with detected providers (CUDA preferred, CPU fallback)
         app = FaceAnalysis(
             name=MODEL_NAME,
-            providers=['CPUExecutionProvider'],
+            providers=DEVICE_INFO["providers"],
             allowed_modules=['detection', 'recognition']  # Skip age/gender for speed
         )
         
-        # Prepare with detection size (smaller = faster)
-        app.prepare(ctx_id=-1, det_size=(DETECTION_SIZE, DETECTION_SIZE))
+        # ctx_id=0 for GPU, ctx_id=-1 for CPU
+        app.prepare(
+            ctx_id=DEVICE_INFO["ctx_id"],
+            det_size=(DETECTION_SIZE, DETECTION_SIZE)
+        )
         
         _face_analyzer = app
-        logger.info(f"Model loaded in {time.time() - start_time:.2f}s")
+        logger.info(f"Model loaded on {device_label} in {time.time() - start_time:.2f}s")
         
         return _face_analyzer
 
@@ -629,6 +668,11 @@ async def health_check():
     return {
         "status": "healthy",
         "model": MODEL_NAME,
+        "device": "GPU (CUDA)" if DEVICE_INFO["use_gpu"] else "CPU",
+        "onnxruntime_providers": DEVICE_INFO["available_providers"],
+        "detection_size": DETECTION_SIZE,
+        "video_process_every_n": VIDEO_PROCESS_EVERY_N_FRAMES,
+        "stream_process_every_n": STREAM_PROCESS_EVERY_N_FRAMES,
         "registered_users": len(known_embeddings),
         "total_embeddings": sum(len(d["embeddings"]) for d in known_embeddings.values())
     }
