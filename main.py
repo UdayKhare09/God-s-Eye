@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-import face_recognition
+from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import uuid
 import os
@@ -13,179 +13,249 @@ import cv2
 import tempfile
 import shutil
 from contextlib import asynccontextmanager
-from functools import lru_cache
 import threading
 import logging
 import time
 import re
-
-from fastapi.middleware.cors import CORSMiddleware
+import insightface
+from insightface.app import FaceAnalysis
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants
-DB_FILE = "data/embeddings.pkl"
-RECOGNITION_TOLERANCE = 0.5
-FRAME_SCALE_FACTOR = 0.5
-VIDEO_PROCESS_EVERY_N_FRAMES = 10
-STREAM_PROCESS_EVERY_N_FRAMES = 30
-REGISTRATION_NUM_JITTERS = 50  # Higher = more accurate but slower
+# ============================================================================
+# CONFIGURATION - Tune these for your CPU
+# ============================================================================
+DB_FILE = "data/embeddings_insightface.pkl"  # New DB file for InsightFace embeddings
+RECOGNITION_THRESHOLD = 0.5  # Cosine distance threshold (lower = stricter, higher = more lenient)
+VIDEO_PROCESS_EVERY_N_FRAMES = 5  # Process more frames since InsightFace is faster
+STREAM_PROCESS_EVERY_N_FRAMES = 5  # More frequent updates for streams
+DETECTION_SIZE = 640  # Detection input size (320/480/640 - lower = faster)
+MODEL_NAME = "buffalo_l"  # buffalo_sc (fast) | buffalo_s | buffalo_l (most accurate, best for angles)
 
-# Thread-safe database lock
+# Thread-safe locks
 db_lock = threading.Lock()
+model_lock = threading.Lock()
 
+# ============================================================================
+# GLOBAL STATE
+# ============================================================================
 # Structure: uuid -> {"name": str, "embeddings": List[np.array]}
 known_embeddings: Dict[str, dict] = {}
 
 # Cached flattened embeddings for fast recognition
-# This avoids rebuilding the list on every recognition call
-_cached_db_lists: Optional[Tuple[List[str], List[np.ndarray], Dict[str, str]]] = None
+_cached_embeddings: Optional[Tuple[List[str], np.ndarray, Dict[str, str]]] = None
 _cache_valid = False
 
+# InsightFace model (lazy loaded)
+_face_analyzer: Optional[FaceAnalysis] = None
 
+
+# ============================================================================
+# MODEL INITIALIZATION
+# ============================================================================
+def get_face_analyzer() -> FaceAnalysis:
+    """
+    Lazy load the InsightFace model with CPU optimizations.
+    Uses thread-safe singleton pattern.
+    """
+    global _face_analyzer
+    
+    if _face_analyzer is not None:
+        return _face_analyzer
+    
+    with model_lock:
+        if _face_analyzer is not None:
+            return _face_analyzer
+        
+        logger.info(f"Loading InsightFace model: {MODEL_NAME}")
+        start_time = time.time()
+        
+        # Initialize with CPU provider
+        app = FaceAnalysis(
+            name=MODEL_NAME,
+            providers=['CPUExecutionProvider'],
+            allowed_modules=['detection', 'recognition']  # Skip age/gender for speed
+        )
+        
+        # Prepare with detection size (smaller = faster)
+        app.prepare(ctx_id=-1, det_size=(DETECTION_SIZE, DETECTION_SIZE))
+        
+        _face_analyzer = app
+        logger.info(f"Model loaded in {time.time() - start_time:.2f}s")
+        
+        return _face_analyzer
+
+
+# ============================================================================
+# CACHE MANAGEMENT
+# ============================================================================
 def invalidate_cache():
-    """Mark the cache as invalid when embeddings change."""
+    """Mark the embedding cache as invalid."""
     global _cache_valid
     _cache_valid = False
 
 
-def get_db_lists() -> Tuple[List[str], List[np.ndarray], Dict[str, str]]:
+def get_cached_embeddings() -> Tuple[List[str], np.ndarray, Dict[str, str]]:
     """
-    Get flattened lists from known_embeddings for recognition.
-    Uses caching to avoid rebuilding on every call.
+    Get flattened embeddings array for vectorized similarity computation.
+    Returns: (uuids_list, embeddings_matrix, uuid_to_name_map)
     """
-    global _cached_db_lists, _cache_valid
+    global _cached_embeddings, _cache_valid
     
-    if _cache_valid and _cached_db_lists is not None:
-        return _cached_db_lists
+    if _cache_valid and _cached_embeddings is not None:
+        return _cached_embeddings
     
-    k_uuids: List[str] = []
-    k_encs: List[np.ndarray] = []
-    k_names: Dict[str, str] = {}
+    uuids: List[str] = []
+    embeddings: List[np.ndarray] = []
+    names: Dict[str, str] = {}
     
     for uid, data in known_embeddings.items():
-        k_names[uid] = data["name"]
+        names[uid] = data["name"]
         for emb in data["embeddings"]:
-            k_uuids.append(uid)
-            k_encs.append(emb)
+            uuids.append(uid)
+            embeddings.append(emb)
     
-    _cached_db_lists = (k_uuids, k_encs, k_names)
+    # Stack into matrix for vectorized operations
+    emb_matrix = np.array(embeddings) if embeddings else np.array([]).reshape(0, 512)
+    
+    _cached_embeddings = (uuids, emb_matrix, names)
     _cache_valid = True
-    return _cached_db_lists
+    
+    return _cached_embeddings
 
 
+# ============================================================================
+# DATABASE OPERATIONS
+# ============================================================================
 def load_db():
     """Load embeddings database from disk."""
     global known_embeddings
+    
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "rb") as f:
-                data = pickle.load(f)
-                # Migration check: if old format (single embedding), convert to list
-                if data and isinstance(list(data.values())[0], dict) and "embedding" in list(data.values())[0]:
-                    logger.info("Migrating DB to new format...")
-                    new_data = {}
-                    for uid, info in data.items():
-                        new_data[uid] = {
-                            "name": info["name"],
-                            "embeddings": [info["embedding"]]
-                        }
-                    known_embeddings = new_data
-                    save_db()
-                else:
-                    known_embeddings = data
+                known_embeddings = pickle.load(f)
             invalidate_cache()
             logger.info(f"Loaded {len(known_embeddings)} users from database")
         except Exception as e:
             logger.error(f"Error loading DB: {e}")
             known_embeddings = {}
+    else:
+        logger.info("No existing database found, starting fresh")
 
 
 def save_db():
     """Save embeddings database to disk (thread-safe)."""
     with db_lock:
+        os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
         with open(DB_FILE, "wb") as f:
             pickle.dump(known_embeddings, f)
     invalidate_cache()
 
 
-def process_image_bytes(contents: bytes) -> np.ndarray:
-    """Convert image bytes to numpy array for face_recognition."""
-    return face_recognition.load_image_file(io.BytesIO(contents))
+# ============================================================================
+# FACE RECOGNITION UTILITIES
+# ============================================================================
+def compute_similarity(embedding1: np.ndarray, embedding2: np.ndarray) -> float:
+    """
+    Compute cosine similarity between two embeddings.
+    Returns value between -1 and 1 (higher = more similar).
+    """
+    return float(np.dot(embedding1, embedding2) / 
+                 (np.linalg.norm(embedding1) * np.linalg.norm(embedding2)))
 
 
 def find_best_match(
-    face_encoding: np.ndarray,
-    known_encs: List[np.ndarray],
+    face_embedding: np.ndarray,
     known_uuids: List[str],
+    known_embeddings_matrix: np.ndarray,
     known_names: Dict[str, str],
-    tolerance: float = RECOGNITION_TOLERANCE
+    threshold: float = RECOGNITION_THRESHOLD
 ) -> Tuple[bool, str, str, float]:
     """
-    Find the best matching face from known encodings.
+    Find the best matching face using vectorized cosine similarity.
     
-    Returns:
-        (is_match, uuid, name, confidence)
+    Returns: (is_match, uuid, name, confidence)
     """
-    if not known_encs:
+    if len(known_embeddings_matrix) == 0:
         return False, "", "Unknown", 0.0
     
-    matches = face_recognition.compare_faces(known_encs, face_encoding, tolerance=tolerance)
-    face_distances = face_recognition.face_distance(known_encs, face_encoding)
+    # Vectorized cosine similarity computation
+    # Normalize the query embedding
+    query_norm = face_embedding / np.linalg.norm(face_embedding)
     
-    best_match_index = np.argmin(face_distances)
+    # Normalize all known embeddings (row-wise)
+    norms = np.linalg.norm(known_embeddings_matrix, axis=1, keepdims=True)
+    known_norm = known_embeddings_matrix / norms
     
-    if matches[best_match_index]:
-        match_uuid = known_uuids[best_match_index]
-        return True, match_uuid, known_names[match_uuid], float(1 - face_distances[best_match_index])
+    # Compute all similarities at once
+    similarities = np.dot(known_norm, query_norm)
+    
+    best_idx = np.argmax(similarities)
+    best_similarity = similarities[best_idx]
+    
+    # Convert similarity to distance (for threshold comparison)
+    # distance = 1 - similarity (0 = identical, 2 = opposite)
+    distance = 1 - best_similarity
+    
+    if distance < threshold:
+        match_uuid = known_uuids[best_idx]
+        confidence = float(best_similarity)  # Use similarity as confidence
+        return True, match_uuid, known_names[match_uuid], confidence
     
     return False, "", "Unknown", 0.0
 
 
-def process_frame_for_recognition(
-    frame: np.ndarray,
-    scale: float = FRAME_SCALE_FACTOR
-) -> Tuple[np.ndarray, List, float]:
-    """
-    Prepare a frame for face recognition processing.
-    
-    Returns:
-        (rgb_frame, face_locations, scale_used)
-    """
-    # Resize for faster processing
-    small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
-    # Convert BGR (OpenCV) to RGB (face_recognition)
-    rgb_frame = np.ascontiguousarray(small_frame[:, :, ::-1])
-    face_locations = face_recognition.face_locations(rgb_frame)
-    return rgb_frame, face_locations, scale
+def process_image_bytes(contents: bytes) -> np.ndarray:
+    """Convert image bytes to BGR numpy array for InsightFace."""
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Failed to decode image")
+    return img
 
 
-# Lifespan context manager for startup/shutdown
+# ============================================================================
+# FASTAPI APPLICATION
+# ============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Application lifespan manager."""
     # Startup
     os.makedirs("static", exist_ok=True)
     os.makedirs("data", exist_ok=True)
     load_db()
+    
+    # Pre-load model during startup
+    logger.info("Pre-loading InsightFace model...")
+    get_face_analyzer()
+    
     logger.info("Application started")
     yield
     # Shutdown
     logger.info("Application shutting down")
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title="God's Eye - Face Recognition API",
+    description="Fast face recognition powered by InsightFace",
+    lifespan=lifespan
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development; restrict in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+# ============================================================================
+# API ENDPOINTS
+# ============================================================================
 @app.get("/users")
 async def get_users():
     """Get list of all registered users with their embedding counts."""
@@ -203,9 +273,11 @@ async def get_users():
 async def register(name: str = Form(...), files: List[UploadFile] = File(...)):
     """
     Register a new user or add more photos to an existing user.
-    Uses high num_jitters for better encoding accuracy.
+    InsightFace extracts high-quality embeddings without needing jittering.
     """
     try:
+        analyzer = get_face_analyzer()
+        
         # Check if name already exists (case-insensitive)
         user_uuid = None
         name_lower = name.lower()
@@ -225,22 +297,34 @@ async def register(name: str = Form(...), files: List[UploadFile] = File(...)):
         
         for file in files:
             contents = await file.read()
-            image = process_image_bytes(contents)
+            try:
+                image = process_image_bytes(contents)
+            except ValueError as e:
+                logger.warning(f"Skipping invalid image: {e}")
+                continue
             
-            # Use higher num_jitters for registration accuracy
-            encodings = face_recognition.face_encodings(image, num_jitters=REGISTRATION_NUM_JITTERS)
+            # Detect and get embeddings
+            faces = analyzer.get(image)
             
-            if encodings:
-                # Assume one person per training image
-                known_embeddings[user_uuid]["embeddings"].append(encodings[0])
+            if faces:
+                # Use the largest face (most prominent) if multiple detected
+                largest_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+                embedding = largest_face.embedding
+                
+                # Normalize embedding before storing
+                embedding = embedding / np.linalg.norm(embedding)
+                known_embeddings[user_uuid]["embeddings"].append(embedding)
                 processed_count += 1
         
         if processed_count == 0:
+            # Clean up if no faces found and user was just created
+            if len(known_embeddings[user_uuid]["embeddings"]) == 0:
+                del known_embeddings[user_uuid]
             return JSONResponse(
                 status_code=400,
                 content={"message": "No faces found in any of the uploaded images"}
             )
-
+        
         save_db()
         
         return {
@@ -263,31 +347,38 @@ async def recognize(file: UploadFile = File(...)):
                 status_code=400,
                 content={"message": "No registered faces in database"}
             )
-
+        
         contents = await file.read()
         image = process_image_bytes(contents)
         
-        # Get face locations and encodings
-        face_locations = face_recognition.face_locations(image)
-        unknown_encodings = face_recognition.face_encodings(image, face_locations)
+        analyzer = get_face_analyzer()
+        faces = analyzer.get(image)
         
-        if not unknown_encodings:
+        if not faces:
             return JSONResponse(
                 status_code=400,
                 content={"message": "No face found in image"}
             )
         
         # Get cached recognition data
-        known_uuids, known_encs, known_names = get_db_lists()
+        known_uuids, known_matrix, known_names = get_cached_embeddings()
         
         found_faces = []
-        for (top, right, bottom, left), unknown_encoding in zip(face_locations, unknown_encodings):
+        for face in faces:
+            bbox = face.bbox.astype(int)
+            embedding = face.embedding / np.linalg.norm(face.embedding)
+            
             is_match, match_uuid, name, confidence = find_best_match(
-                unknown_encoding, known_encs, known_uuids, known_names
+                embedding, known_uuids, known_matrix, known_names
             )
             
             face_data = {
-                "box": {"top": top, "right": right, "bottom": bottom, "left": left},
+                "box": {
+                    "top": int(bbox[1]),
+                    "right": int(bbox[2]),
+                    "bottom": int(bbox[3]),
+                    "left": int(bbox[0])
+                },
                 "match": is_match,
                 "name": name,
                 "confidence": confidence
@@ -297,12 +388,12 @@ async def recognize(file: UploadFile = File(...)):
                 face_data["uuid"] = match_uuid
             
             found_faces.append(face_data)
-            
+        
         return {
             "message": f"Found {len(found_faces)} faces",
             "faces": found_faces
         }
-
+        
     except Exception as e:
         logger.error(f"Recognition error: {e}")
         return JSONResponse(status_code=500, content={"message": str(e)})
@@ -310,7 +401,7 @@ async def recognize(file: UploadFile = File(...)):
 
 @app.post("/recognize_video")
 async def recognize_video(file: UploadFile = File(...)):
-    """Analyze a video file and identify all recognized faces, saving the frame with highest confidence."""
+    """Analyze a video file and identify all recognized faces."""
     temp_path = None
     try:
         if not known_embeddings:
@@ -318,37 +409,33 @@ async def recognize_video(file: UploadFile = File(...)):
                 status_code=400,
                 content={"message": "No registered faces in database"}
             )
-
+        
         # Ensure detections directory exists
         detections_dir = "static/detections"
         os.makedirs(detections_dir, exist_ok=True)
-
-        # Save to temp file (cv2.VideoCapture needs a file path)
+        
+        # Save to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             shutil.copyfileobj(file.file, tmp)
             temp_path = tmp.name
-
+        
         video_capture = cv2.VideoCapture(temp_path)
         
         if not video_capture.isOpened():
             raise HTTPException(status_code=400, detail="Failed to open video file")
         
-        # Dictionary to track best detection of each person
+        analyzer = get_face_analyzer()
+        known_uuids, known_matrix, known_names = get_cached_embeddings()
+        
+        if len(known_matrix) == 0:
+            video_capture.release()
+            return {"message": "Video analysis complete", "found_people": []}
+        
+        # Track best detection of each person
         # name -> {"frame": ndarray, "confidence": float, "frame_number": int, "box": tuple}
         found_people = {}
         frame_count = 0
-        scale_inverse = int(1 / FRAME_SCALE_FACTOR)
         
-        # Get cached recognition data
-        known_uuids, known_encs, known_names = get_db_lists()
-        
-        if not known_encs:
-            video_capture.release()
-            return {
-                "message": "Video analysis complete",
-                "found_people": []
-            }
-
         while True:
             ret, frame = video_capture.read()
             if not ret:
@@ -357,53 +444,45 @@ async def recognize_video(file: UploadFile = File(...)):
             frame_count += 1
             if frame_count % VIDEO_PROCESS_EVERY_N_FRAMES != 0:
                 continue
-
-            rgb_frame, face_locations, _ = process_frame_for_recognition(frame)
             
-            if not face_locations:
-                continue
+            faces = analyzer.get(frame)
+            
+            for face in faces:
+                embedding = face.embedding / np.linalg.norm(face.embedding)
+                bbox = face.bbox.astype(int)
                 
-            face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-
-            for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
                 is_match, _, name, confidence = find_best_match(
-                    face_encoding, known_encs, known_uuids, known_names
+                    embedding, known_uuids, known_matrix, known_names
                 )
                 
-                # Track the frame with highest confidence for each person
                 if is_match:
                     if name not in found_people or confidence > found_people[name]["confidence"]:
-                        # Scale coordinates back to original frame size
-                        scaled_top = top * scale_inverse
-                        scaled_right = right * scale_inverse
-                        scaled_bottom = bottom * scale_inverse
-                        scaled_left = left * scale_inverse
-                        
-                        # Store frame and metadata (will save the best one later)
                         found_people[name] = {
                             "frame": frame.copy(),
                             "confidence": confidence,
                             "frame_number": frame_count,
-                            "box": (scaled_left, scaled_top, scaled_right, scaled_bottom)
+                            "box": (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
                         }
-
+        
         video_capture.release()
-
-        # Now save the best frame for each person
+        
+        # Save best frame for each person
         result_people = []
         for name, data in found_people.items():
             frame = data["frame"]
             left, top, right, bottom = data["box"]
             confidence = data["confidence"]
             
-            # Draw bounding box and label on the frame
+            # Draw bounding box and label
             cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 3)
             cv2.rectangle(frame, (left, bottom - 40), (right, bottom), (0, 255, 0), cv2.FILLED)
-            cv2.putText(frame, f"{name} ({confidence:.1%})", 
-                      (left + 6, bottom - 10), 
-                      cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(
+                frame, f"{name} ({confidence:.1%})",
+                (left + 6, bottom - 10),
+                cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 2
+            )
             
-            # Save frame with unique filename
+            # Save frame
             timestamp = int(time.time() * 1000)
             safe_name = re.sub(r'[^a-z0-9]+', '_', name.lower())
             filename = f"{timestamp}_{safe_name}.jpg"
@@ -416,43 +495,40 @@ async def recognize_video(file: UploadFile = File(...)):
                 "confidence": confidence,
                 "frame_number": data["frame_number"]
             })
-
+        
         return {
             "message": "Video analysis complete",
             "found_people": result_people
         }
-
+        
     except Exception as e:
         logger.error(f"Video recognition error: {e}")
         return JSONResponse(status_code=500, content={"message": str(e)})
     finally:
-        # Cleanup temp file
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
 
-# Global state for RTSP streaming
-camera_config = {
-    "url": None
-}
+# ============================================================================
+# RTSP STREAMING
+# ============================================================================
+camera_config = {"url": None}
 
 
 def generate_frames(rtsp_url: str):
     """
     Generator that yields MJPEG frames from an RTSP stream with face recognition overlays.
-    Processes faces every N frames to maintain smooth streaming.
     """
     camera = cv2.VideoCapture(rtsp_url)
     if not camera.isOpened():
         logger.error(f"Cannot open camera: {rtsp_url}")
         return
-
-    # Get cached recognition data
-    k_uuids, k_encs, k_names = get_db_lists()
+    
+    analyzer = get_face_analyzer()
+    known_uuids, known_matrix, known_names = get_cached_embeddings()
     
     frame_count = 0
     detected_faces: List[Tuple[int, int, int, int, str, Tuple[int, int, int]]] = []
-    scale_inverse = int(1 / FRAME_SCALE_FACTOR)
     
     try:
         while True:
@@ -461,40 +537,40 @@ def generate_frames(rtsp_url: str):
                 break
             
             frame_count += 1
-
-            # Process faces periodically to prevent lag
-            if frame_count % STREAM_PROCESS_EVERY_N_FRAMES == 0 and k_encs:
-                rgb_frame, face_locations, _ = process_frame_for_recognition(frame)
-                face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+            
+            # Process faces periodically
+            if frame_count % STREAM_PROCESS_EVERY_N_FRAMES == 0 and len(known_matrix) > 0:
+                faces = analyzer.get(frame)
                 
                 new_faces = []
-                for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-                    # Scale coordinates back to original size
-                    top *= scale_inverse
-                    right *= scale_inverse
-                    bottom *= scale_inverse
-                    left *= scale_inverse
-
+                for face in faces:
+                    bbox = face.bbox.astype(int)
+                    embedding = face.embedding / np.linalg.norm(face.embedding)
+                    
                     is_match, _, name, _ = find_best_match(
-                        face_encoding, k_encs, k_uuids, k_names
+                        embedding, known_uuids, known_matrix, known_names
                     )
                     
-                    color = (0, 255, 0) if is_match else (0, 0, 255)  # Green/Red in BGR
-                    new_faces.append((top, right, bottom, left, name, color))
+                    color = (0, 255, 0) if is_match else (0, 0, 255)
+                    new_faces.append((
+                        int(bbox[1]), int(bbox[2]), int(bbox[3]), int(bbox[0]),
+                        name, color
+                    ))
                 
                 detected_faces = new_faces
-
-            # Draw detected faces on every frame for smooth visualization
+            
+            # Draw detected faces
             for (top, right, bottom, left, name, color) in detected_faces:
                 cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
                 cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
-                cv2.putText(frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
-
+                cv2.putText(frame, name, (left + 6, bottom - 6), 
+                           cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+            
             # Encode frame as JPEG
             ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ret:
                 continue
-                
+            
             yield (
                 b'--frame\r\n'
                 b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n'
@@ -520,7 +596,6 @@ async def video_feed():
             detail="No camera URL set. Please configure it first."
         )
     
-    # Quick connection check
     cap = cv2.VideoCapture(url)
     if not cap.isOpened():
         raise HTTPException(
@@ -535,18 +610,31 @@ async def video_feed():
     )
 
 
-# Health check endpoint
+@app.delete("/users/{user_uuid}")
+async def delete_user(user_uuid: str):
+    """Delete a registered user."""
+    if user_uuid not in known_embeddings:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    name = known_embeddings[user_uuid]["name"]
+    del known_embeddings[user_uuid]
+    save_db()
+    
+    return {"message": f"Deleted user: {name}"}
+
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for monitoring."""
+    """Health check endpoint."""
     return {
         "status": "healthy",
+        "model": MODEL_NAME,
         "registered_users": len(known_embeddings),
         "total_embeddings": sum(len(d["embeddings"]) for d in known_embeddings.values())
     }
 
 
-# Mount static files last to avoid conflicts with API routes
+# Mount static files last
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 
