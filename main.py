@@ -859,10 +859,25 @@ async def health_check():
     }
 
 
-# Mount static files last
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+from fastapi.responses import FileResponse
+import os
 
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    # Check if the requested path is a real file in static directory
+    static_file_path = os.path.join("static", full_path)
+    if os.path.isfile(static_file_path):
+        return FileResponse(static_file_path)
+    # Otherwise return index.html for React Router
+    return FileResponse("static/index.html")
 
 if __name__ == '__main__':
     import uvicorn
+    print("\n" + "="*50)
+    print("🚀 GOD'S EYE BACKEND & FRONTEND INITIALIZED 🚀")
+    print("="*50)
+    print("You no longer need to run 'npm run dev'.")
+    print("The entire application (both theme and backend) is now hosted on:")
+    print("👉  http://localhost:8000/")
+    print("="*50 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)
